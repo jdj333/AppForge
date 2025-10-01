@@ -5,7 +5,7 @@ AppForge — scaffold & edit project files via natural language prompts (OpenAI 
 Enhancements in this version:
 - Ensures Python projects always include requirements.txt
 - Ensures Node.js projects always include package.json
-- After each plan/apply, suggests commands to build/run the app
+- After each plan/apply, prints concrete "Next steps to run the app (build/start)" commands
 """
 
 import argparse
@@ -154,26 +154,31 @@ def parse_plan_json(raw: Dict[str, Any]) -> Plan:
     return Plan(files=files, notes=raw.get("notes"))
 
 def ensure_baseline_files(plan: Plan, prompt: str) -> Plan:
-    """Guarantee requirements.txt for Python, package.json for Node.js."""
+    """Guarantee requirements.txt for Python, package.json for Node.js (if missing)."""
     lower = prompt.lower()
     paths = {fc.path for fc in plan.files}
-    if "python" in lower or "flask" in lower or "django" in lower:
-        if "requirements.txt" not in paths:
-            plan.files.append(FileChange(
-                path="requirements.txt",
-                contents="flask\ndjango\n# add other deps here\n"
-            ))
-    if "node" in lower or "react" in lower or "express" in lower:
-        if "package.json" not in paths:
-            plan.files.append(FileChange(
-                path="package.json",
-                contents=json.dumps({
-                    "name": "appforge-project",
-                    "version": "1.0.0",
-                    "scripts": {"start": "node index.js"},
-                    "dependencies": {}
-                }, indent=2)
-            ))
+
+    is_python = ("python" in lower or "flask" in lower or "django" in lower
+                 or any(p.endswith(".py") for p in paths) or "requirements.txt" in paths)
+    is_node = ("node" in lower or "react" in lower or "express" in lower
+               or "package.json" in paths or any(p.endswith(".js") or p.endswith(".jsx") for p in paths))
+
+    if is_python and "requirements.txt" not in paths:
+        plan.files.append(FileChange(
+            path="requirements.txt",
+            contents="flask>=3.0.0\n# django>=5.0.0  # uncomment if using Django\n"
+        ))
+    if is_node and "package.json" not in paths:
+        plan.files.append(FileChange(
+            path="package.json",
+            contents=json.dumps({
+                "name": "appforge-project",
+                "version": "1.0.0",
+                "private": True,
+                "scripts": {"start": "node index.js"},
+                "dependencies": {}
+            }, indent=2)
+        ))
     return plan
 
 
@@ -217,41 +222,82 @@ def apply_plan(plan: Plan, output_root: Path, dry_run: bool, force: bool) -> Lis
     return written
 
 
-# ---------- CLI ----------
-def suggest_commands(prompt: str):
+# ---------- Next steps helper ----------
+def detect_project(plan: Plan, prompt: str) -> Dict[str, bool]:
+    paths = {fc.path for fc in plan.files}
     lower = prompt.lower()
-    if "python" in lower or "flask" in lower or "django" in lower:
-        print("\n👉 Suggested next steps:")
-        print("   pip install -r requirements.txt")
-        print("   python app.py   # or manage.py runserver (for Django)")
-    elif "node" in lower or "react" in lower or "express" in lower:
-        print("\n👉 Suggested next steps:")
-        print("   npm install")
-        print("   npm start")
+    return {
+        "django": ("django" in lower) or any(p.endswith("manage.py") or "django" in p for p in paths),
+        "python": ("python" in lower or "flask" in lower or any(p.endswith(".py") for p in paths)
+                   or "requirements.txt" in paths),
+        "node": ("node" in lower or "react" in lower or "express" in lower
+                 or "package.json" in paths or any(p.endswith(".js") or p.endswith(".jsx") for p in paths)),
+        "docker": ("docker" in lower) or any(Path(p).name.lower() == "dockerfile" for p in paths),
+        "has_src_app_py": ("app.py" in paths or "src/app.py" in paths),
+        "has_manage_py": ("manage.py" in paths),
+        "has_package_json": ("package.json" in paths),
+    }
 
+def next_steps(plan: Plan, prompt: str, after_apply: bool, output_root: Optional[Path] = None) -> None:
+    flags = detect_project(plan, prompt)
+    print("\nNext steps to run the app (build/start):")
+    if after_apply and output_root is not None:
+        print(f"  cd {output_root}")
+
+    if flags["django"]:
+        print("  pip install -r requirements.txt")
+        print("  python manage.py migrate  # if migrations exist")
+        print("  python manage.py runserver")
+    elif flags["python"]:
+        print("  pip install -r requirements.txt")
+        # Prefer src/app.py if present
+        entry = "src/app.py" if flags["has_src_app_py"] else "app.py"
+        print(f"  python {entry}")
+    elif flags["node"]:
+        if flags["has_package_json"]:
+            print("  npm install")
+            print("  npm start  # or: node index.js")
+        else:
+            print("  # Initialize node project if needed:")
+            print("  npm init -y && npm install && npm start")
+    else:
+        print("  # Review generated files and run using the appropriate toolchain.")
+
+    if flags["docker"]:
+        print("\n  # Using Docker instead:")
+        print("  docker build -t appforge-app .")
+        print("  docker run --rm -p 8000:8000 appforge-app")
+
+
+# ---------- CLI ----------
 def main():
-    parser = argparse.ArgumentParser(prog="AppForge")
+    parser = argparse.ArgumentParser(prog="AppForge", description="Scaffold & edit code from natural language prompts.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    # Global
     parser.add_argument("--root", default=".", help="Project root (default: .)")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"OpenAI model (default: {DEFAULT_MODEL})")
 
-    p_plan = sub.add_parser("plan")
-    p_plan.add_argument("prompt", nargs="+")
-    p_plan.add_argument("--save-plan", default=None)
+    # plan
+    p_plan = sub.add_parser("plan", help="Generate a plan and print to console (no files written).")
+    p_plan.add_argument("prompt", nargs="+", help="Natural language instructions")
+    p_plan.add_argument("--save-plan", default=None, help="Optional: save plan JSON to this path")
+    p_plan.add_argument("--no-tree", action="store_true", help="Skip project tree preview")
 
-    p_apply = sub.add_parser("apply")
-    p_apply.add_argument("prompt", nargs="*")
-    p_apply.add_argument("--plan", default=None)
-    p_apply.add_argument("--dry-run", action="store_true")
-    p_apply.add_argument("--force", action="store_true")
-    p_apply.add_argument("--output-path", default=None)
-    p_apply.add_argument("--inplace", action="store_true")
-    p_apply.add_argument("--save-plan", default=None)
+    # apply
+    p_apply = sub.add_parser("apply", help="Apply a plan to disk (from a plan file or from a fresh prompt).")
+    p_apply.add_argument("prompt", nargs="*", help="Optional: prompt to generate + apply immediately")
+    p_apply.add_argument("--plan", default=None, help="Plan JSON file to apply (ignored if prompt is given)")
+    p_apply.add_argument("--dry-run", action="store_true", help="Preview actions without writing files")
+    p_apply.add_argument("--force", action="store_true", help="Allow overwriting existing files")
+    p_apply.add_argument("--output-path", default=None, help=f"Where to write files (default: ./{DEFAULT_OUTDIR})")
+    p_apply.add_argument("--inplace", action="store_true", help="Write directly into --root (disables output dir)")
+    p_apply.add_argument("--save-plan", default=None, help="Optional: save generated/loaded plan JSON to this path")
 
     args = parser.parse_args()
     project_root = Path(args.root).resolve()
 
+    # API key
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         print("Error: OPENAI_API_KEY is not set.", file=sys.stderr)
@@ -260,37 +306,63 @@ def main():
 
     if args.cmd == "plan":
         user_prompt = " ".join(args.prompt)
-        model_prompt = build_user_prompt(user_prompt, make_tree_preview(project_root))
+        tree_preview = None if args.no_tree else make_tree_preview(project_root)
+        model_prompt = build_user_prompt(user_prompt, tree_preview)
         raw = call_model(client, args.model, model_prompt)
         plan = ensure_baseline_files(parse_plan_json(raw), user_prompt)
+
         if args.save_plan:
             save_plan_to_file(plan, Path(args.save_plan))
             print(f"Plan saved to {args.save_plan}")
+
         print("\nPlanned files:")
-        print(pretty_table([[fc.path, str(len(fc.contents))+" chars"] for fc in plan.files],
-                          header=["path","size"]))
-        suggest_commands(user_prompt)
+        print(pretty_table([[fc.path, f"{len(fc.contents)} chars"] for fc in plan.files],
+                           header=["path", "size"]))
+
+        # Print concrete next steps
+        next_steps(plan, user_prompt, after_apply=False, output_root=None)
 
     elif args.cmd == "apply":
+        # Source the plan
         if args.prompt:
             user_prompt = " ".join(args.prompt)
-            raw = call_model(client, args.model, build_user_prompt(user_prompt, make_tree_preview(project_root)))
+            tree_preview = make_tree_preview(project_root)
+            raw = call_model(client, args.model, build_user_prompt(user_prompt, tree_preview))
             plan = ensure_baseline_files(parse_plan_json(raw), user_prompt)
         else:
             if not args.plan:
                 print("Error: --plan required if no prompt.", file=sys.stderr)
                 sys.exit(2)
-            with Path(args.plan).open("r") as f:
+            with Path(args.plan).open("r", encoding="utf-8") as f:
                 plan = parse_plan_json(json.load(f))
             user_prompt = "applied plan"
 
-        output_root = resolve_output_root(project_root, args.output_path, args.inplace)
-        written = apply_plan(plan, output_root, args.dry_run, args.force)
+        # Resolve output root (default ./output)
+        output_root = resolve_output_root(project_root, args.output_path or DEFAULT_OUTDIR, args.inplace)
+
+        # Show intended actions (summary)
+        rows = []
+        for fc in plan.files:
+            tgt = (output_root / fc.path).resolve()
+            action = "write"
+            if tgt.exists():
+                action = "overwrite" if args.force else "skip"
+            rows.append([fc.path, action, "exec" if fc.executable else "", f"{len(fc.contents)} chars"])
+        print("\nApplying plan to:", output_root)
+        print(pretty_table(rows, header=["path", "action (if exists)", "mode", "size"]))
+
+        written = apply_plan(plan, output_root, dry_run=args.dry_run, force=args.force)
         if args.dry_run:
-            print("\n(DRY RUN) No files written.")
+            print("\n(DRY RUN) No files were written.")
         else:
-            print(f"\nDone. Wrote {len(written)} files to {output_root}")
-        suggest_commands(user_prompt)
+            print(f"\nDone. Wrote {len(written)} file(s) to {output_root}.")
+
+        # Print concrete next steps (with cd to output dir)
+        next_steps(plan, user_prompt, after_apply=True, output_root=output_root)
+
+    else:
+        parser.print_help()
+
 
 if __name__ == "__main__":
     main()
