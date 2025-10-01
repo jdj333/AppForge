@@ -1,26 +1,38 @@
 # AppForge
 
 AppForge is a command-line tool that lets you use **natural language prompts** to scaffold and edit project files.  
-It leverages the OpenAI API to generate project structures, config files, and boilerplate code — then safely writes them to disk.
+It leverages the OpenAI API to generate project structures, config files, and boilerplate code — then safely writes them to disk.  
+Now with **self-healing startup checks** and **login verification** for generated apps.
 
 By default, files are written under `./output/`, so your main project tree stays untouched until you’re ready.  
 You can override with `--output-path` or use `--inplace` to write directly into your project root.
 
 ---
 
-## ✨ What’s new (reliability & DX)
+## ✨ What’s new (reliability, UX & self-heal)
 
 - ✅ **Build reliability for Python & Node**
   - Auto-generate **`requirements.txt`** with **known-good pins** and **`constraints.txt`** for reproducible installs
   - Auto-generate **`package.json`** (+ `.nvmrc`) with usable `start` script and Node ≥ 18
 - 🐍 **Python web defaults**
   - Adds `/health` route, binds to `0.0.0.0`, honors `PORT` (default **8000**)
-  - Creates `run_local.sh`, `smoke.sh`, and `wait_for_port.py`
+  - Creates `run_local.sh`, `smoke.sh`, `wait_for_port.py`, and safe `init_db.py`
+- 🔑 **Login detection**
+  - If a prompt requests login/auth, AppForge scaffolds a **default login** (HTML form + backend)
+  - Generates **default test credentials** (e.g., `admin` / `password123`)
+  - Self-heal runs a **login test via curl** after startup to verify it works
 - 🐳 **Docker resilience**
   - Emits a cache-friendly **Dockerfile** (Python), **.dockerignore**, and container **HEALTHCHECK**
   - Prints Buildx & platform hints on Apple Silicon
 - 🩺 **Preflight**
   - `doctor` command: checks Python/Node/NPM/Docker availability and port status
+- 🔁 **Self-heal**
+  - New `--self-heal` flag: after apply, AppForge:
+    1. Installs dependencies  
+    2. Starts the app  
+    3. Runs `/health` check (and `/login` if present)  
+    4. If errors are found, prompts you to auto-patch  
+    5. Applies patches, retries up to 2 cycles
 - 🧭 **Run UX**
   - After **plan** and **apply**, prints **Next steps to run the app (build/start)** +
     **OS-specific open command** (`open` / `start` / `xdg-open`) to `http://localhost:<port>`
@@ -45,6 +57,9 @@ You can override with `--output-path` or use `--inplace` to write directly into 
   - Dockerfile with `pip` upgrade, pinned installs, app healthcheck, and expose 8000.
 - 🔍 Preflight:
   - `doctor` validates environment & ports.
+- 🔁 Self-healing startup check:
+  - Installs, runs, and tests health/login endpoints automatically.
+  - Proposes auto-fixes for errors.
 - 📂 Optional `--save-plan` to persist JSON plans.
 - 📑 Automatic summary tables for planned changes.
 
@@ -103,16 +118,16 @@ python3 appforge.py doctor --port 8001
 ### 1) Plan (no writes)
 
 ```bash
-python3 appforge.py plan "Scaffold a Flask web app with app.py, requirements.txt, and Dockerfile. Add /health and bind 0.0.0.0 on PORT." --save-plan plan.json
+python3 appforge.py plan "Scaffold a Flask web app with login and dashboard, /health, and Docker support" --save-plan plan.json
 ```
 
-* Prints a table of proposed files (including `requirements.txt`, `constraints.txt`, helpers, Dockerfile).
+* Prints a table of proposed files.
 * Saves JSON plan to `plan.json`.
-* Prints **Next steps to run the app (build/start)** including an **open** command to your localhost URL.
+* Prints **Next steps to run the app (build/start)**.
 
 ### 2) Apply
 
-Write the plan’s files to `./output`:
+Apply a plan’s files to `./output`:
 
 ```bash
 python3 appforge.py apply --plan plan.json
@@ -121,15 +136,26 @@ python3 appforge.py apply --plan plan.json
 Apply directly from a fresh prompt:
 
 ```bash
-python3 appforge.py apply "Create a Django app with manage.py, settings, urls, wsgi, and a /health endpoint"
+python3 appforge.py apply "Create a Flask app with login page, /health endpoint, and dashboard route"
 ```
 
-After apply, AppForge prints:
+Apply with **self-heal**:
 
-* `cd ./output`
-* Exact install & start commands (Python/Node)
-* Docker build/run alternatives
-* An **open** command to launch your browser (`http://localhost:<port>`)
+```bash
+python3 appforge.py apply "Create a Flask app with login page and dashboard" --self-heal
+```
+
+AppForge will then:
+
+* Create a virtualenv
+* Install dependencies
+* Start the app
+* Check `/health`
+* If a login is present:
+
+  * Print generated **username/password**
+  * Run a test `curl -X POST` against `/login`
+* If startup or login fails, it offers to auto-fix and retry.
 
 ---
 
@@ -144,6 +170,7 @@ After apply, AppForge prints:
 | `--force`            | Allow overwriting existing files                               |
 | `--save-plan <file>` | Save generated/loaded plan JSON                                |
 | `--port <n>`         | Preferred port (AppForge finds a free one starting from `<n>`) |
+| `--self-heal`        | Run install/start/health/login tests and auto-fix errors       |
 
 Run `python3 appforge.py --help` for full details.
 
@@ -151,86 +178,35 @@ Run `python3 appforge.py --help` for full details.
 
 ## 🌱 Example Prompts
 
-### Start a Flask Web Project (with healthcheck + Docker)
+### Flask App with Login
 
 ```bash
 python3 appforge.py apply "Create a Flask app with:
-- src/app.py exposing / and /health, bind 0.0.0.0 and PORT env (default 8000)
-- requirements.txt and constraints.txt using Flask 3 + Werkzeug 3 pins
-- Dockerfile with healthcheck and .dockerignore
-- templates/login.html and templates/dashboard.html
-- README.md with run instructions"
+- src/app.py with /health, /login, /dashboard
+- login.html template (POST form with username/password)
+- default credentials admin/password123
+- requirements.txt + constraints.txt
+- Dockerfile with healthcheck
+- README with run instructions"
+--self-heal
 ```
 
-**Then run (shown by AppForge after apply):**
+AppForge will generate the app, install dependencies, start it,
+print the **login credentials**, and run a **curl login test** automatically.
+
+### Django App with Auth
 
 ```bash
-cd output
-python -m venv .venv && . .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt -c constraints.txt
-python src/app.py
-# macOS: open http://localhost:8000
-# Linux: xdg-open http://localhost:8000
-# WinPS: start http://localhost:8000
-```
-
-**Docker alternative (also shown after apply):**
-
-```bash
-docker build -t appforge-app .
-docker run --rm -p 8000:8000 appforge-app
-# open http://localhost:8000
-```
-
-### Start a Django Web Project
-
-```bash
-python3 appforge.py apply "Scaffold a Django project called farmapp with:
+python3 appforge.py apply "Scaffold a Django project with:
 - manage.py
-- farmapp/settings.py, urls.py (add /health), wsgi.py
-- requirements.txt + constraints.txt with pinned versions
-- Dockerfile (+ .dockerignore)
-- README with run commands"
+- settings.py, urls.py with /health
+- built-in Django auth (username/password)
+- requirements.txt + constraints.txt
+- Dockerfile"
+--self-heal
 ```
 
-**Run (AppForge prints exact commands):**
-
-```bash
-cd output
-python -m venv .venv && . .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt -c constraints.txt
-python manage.py migrate
-python manage.py runserver 0.0.0.0:8000
-# open http://localhost:8000
-```
-
-### Add Frontend (React + Vite)
-
-```bash
-python3 appforge.py apply "Add a React + Vite frontend with:
-- package.json (start script), vite.config.js
-- src/App.jsx with a health route call
-- .nvmrc set to Node 18
-- README with npm commands"
-```
-
-**Run (AppForge prints exact commands):**
-
-```bash
-cd output
-npm install
-npm start
-# open http://localhost:8000
-```
-
-### Add CI/CD
-
-```bash
-python3 appforge.py apply "Add a GitHub Actions workflow at .github/workflows/ci.yml
-that installs dependencies, runs lint/test, builds Docker image, and pushes to GHCR"
-```
+Self-heal runs `/health` and a login test using the default superuser.
 
 ---
 
@@ -245,10 +221,9 @@ that installs dependencies, runs lint/test, builds Docker image, and pushes to G
 | `run_local.sh`     | One-command local startup (Python or Node)               |
 | `smoke.sh`         | Simple curl-based health check                           |
 | `wait_for_port.py` | Small helper to wait for a local port to open (Python)   |
+| `init_db.py`       | Safe DB initialization script (for Flask/Django apps)    |
 | `Dockerfile`       | Cache-friendly Dockerfile with healthcheck (Python apps) |
 | `.dockerignore`    | Sensible defaults to shrink Docker build context         |
-
-> All shell helpers are created **executable**.
 
 ---
 
@@ -259,5 +234,5 @@ that installs dependencies, runs lint/test, builds Docker image, and pushes to G
 * By default, all files go to `./output/`.
 * To overwrite existing files, add `--force`.
 * On Apple Silicon, AppForge may print a `buildx` command with `--platform=linux/amd64` when appropriate.
+* If login is included, AppForge prints generated **credentials** and verifies login with a `curl` POST.
 
----
